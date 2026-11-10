@@ -41,7 +41,7 @@ The raw API `Schedule(function, data, dependency)` and `ScheduleParallelFor` tak
 
 ## Examples
 
-`examples/frame_demo.cpp` opens a window, simulates 262144 particles with two dependent
+`Examples/FrameDemo/FrameDemo.cpp` opens a window, simulates 262144 particles with two dependent
 `ParallelFor` jobs per frame, logs input and writes a profiler capture after 120 frames.
 
 ## Build

@@ -1,9 +1,9 @@
-#include <helix/core/log/log.h>
-#include <helix/jobs/jobs.h>
-#include <helix/platform/file_system.h>
-#include <helix/platform/time.h>
-#include <helix/platform/window.h>
-#include <helix/profiler/profiler.h>
+#include <Helix/Core/Logging/Log.h>
+#include <Helix/Jobs/Jobs.h>
+#include <Helix/Platform/IO/FileSystem.h>
+#include <Helix/Platform/Time/Time.h>
+#include <Helix/Platform/Window/Window.h>
+#include <Helix/Profiler/Profiler.h>
 
 #include <cmath>
 

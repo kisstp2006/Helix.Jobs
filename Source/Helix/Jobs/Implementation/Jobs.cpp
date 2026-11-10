@@ -1,9 +1,9 @@
-#include <helix/jobs/jobs.h>
-#include <helix/core/base/assert.h>
-#include <helix/core/memory/allocator.h>
-#include <helix/core/strings/format.h>
-#include <helix/platform/thread.h>
-#include <helix/profiler/profiler.h>
+#include <Helix/Jobs/Jobs.h>
+#include <Helix/Core/Basics/Assert.h>
+#include <Helix/Core/Memory/Allocator.h>
+#include <Helix/Core/Strings/Format.h>
+#include <Helix/Platform/Threading/Thread.h>
+#include <Helix/Profiler/Profiler.h>
 
 #include <atomic>
 

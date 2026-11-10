@@ -1,1 +1,1 @@
-{ "version": 6, "include": ["external/Helix.CMake/presets/HelixPresets.json"] }
+{ "version": 6, "include": ["External/Helix.CMake/Presets/HelixPresets.json"] }

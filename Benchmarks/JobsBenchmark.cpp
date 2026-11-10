@@ -1,6 +1,6 @@
-#include <helix/jobs/jobs.h>
-#include <helix/core/containers/array.h>
-#include <helix/testing/bench.h>
+#include <Helix/Jobs/Jobs.h>
+#include <Helix/Core/Containers/Array.h>
+#include <Helix/Testing/Bench.h>
 
 #include <atomic>
 #include <cmath>

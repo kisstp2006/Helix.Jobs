@@ -1,15 +1,15 @@
-[submodule "external/Helix.CMake"]
-	path = external/Helix.CMake
+[submodule "External/Helix.CMake"]
+	path = External/Helix.CMake
 	url = https://github.com/kisstp2006/Helix.CMake
-[submodule "external/Helix.Testing"]
-	path = external/Helix.Testing
+[submodule "External/Helix.Testing"]
+	path = External/Helix.Testing
 	url = https://github.com/kisstp2006/Helix.Testing
-[submodule "external/Helix.Core"]
-	path = external/Helix.Core
+[submodule "External/Helix.Core"]
+	path = External/Helix.Core
 	url = https://github.com/kisstp2006/Helix.Core
-[submodule "external/Helix.Platform"]
-	path = external/Helix.Platform
+[submodule "External/Helix.Platform"]
+	path = External/Helix.Platform
 	url = https://github.com/kisstp2006/Helix.Platform
-[submodule "external/Helix.Profiler"]
-	path = external/Helix.Profiler
+[submodule "External/Helix.Profiler"]
+	path = External/Helix.Profiler
 	url = https://github.com/kisstp2006/Helix.Profiler

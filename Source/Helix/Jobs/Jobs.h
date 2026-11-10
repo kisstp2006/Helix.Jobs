@@ -1,7 +1,7 @@
 #pragma once
 
-#include <helix/core/base/span.h>
-#include <helix/core/base/utility.h>
+#include <Helix/Core/Basics/Span.h>
+#include <Helix/Core/Basics/Utility.h>
 
 #include <cstring>
 #include <new>
