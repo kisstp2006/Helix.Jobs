@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Helix</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #111; color: #ccc; font-family: monospace; }
+    #canvas { display: block; width: 100%; height: 70%; background: #222; outline: none; }
+    #log { height: 30%; overflow: auto; margin: 0; padding: 4px 8px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+  <pre id="log"></pre>
+  <script>
+    var logElement = document.getElementById('log');
+    function append(text) { logElement.textContent += text + '\n'; logElement.scrollTop = logElement.scrollHeight; console.log(text); }
+    var Module = { canvas: document.getElementById('canvas'), print: append, printErr: append };
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>
