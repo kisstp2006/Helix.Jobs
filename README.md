@@ -47,7 +47,8 @@ The raw API `Schedule(function, data, dependency)` and `ScheduleParallelFor` tak
 ## Build
 
 ```
-git clone --recursive https://github.com/kisstp2006/Helix.Jobs
+git clone https://github.com/kisstp2006/Helix.Jobs
+git -C Helix.Jobs submodule update --init
 cmake --preset windows-release
 cmake --build --preset windows-release
 ctest --preset windows-release
