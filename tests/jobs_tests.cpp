@@ -144,3 +144,17 @@ HX_TEST(Jobs, RawFunctionApi)
     Complete(h);
     HX_CHECK_EQ(data.sum.load(), 999u * 1000u / 2u);
 }
+
+HX_TEST(Jobs, RepeatedTinyParallelForAndChains)
+{
+    Session s;
+    std::atomic<u32> total{0};
+    std::atomic<u32>* p = &total;
+    for (int round = 0; round < 300; round++)
+    {
+        JobHandle a = ParallelFor(5000, 8, [p](u32) { p->fetch_add(1, std::memory_order_relaxed); });
+        JobHandle b = ParallelFor(700, 1, [p](u32) { p->fetch_add(1, std::memory_order_relaxed); }, a);
+        Complete(b);
+        HX_REQUIRE(total.load() == u32(round + 1) * 5700u);
+    }
+}

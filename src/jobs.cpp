@@ -17,7 +17,7 @@ namespace helix::jobs
         constexpr u32 kDequeCapacity = 4096;
         constexpr u32 kGlobalCapacity = kMaxJobs;
 
-        struct Job
+        struct alignas(64) Job
         {
             JobFunction function;
             void* data;
@@ -27,57 +27,86 @@ namespace helix::jobs
             u32 nextWaiting;
         };
 
+        constexpr u32 kClosed = 0xFFFFFFFFu;
+        constexpr u64 Pack(u32 generation, u32 job) { return (u64(generation) << 32) | job; }
+
+        // waiting holds (generation, first waiting job); a closed list or another generation refuses new waiters.
         struct alignas(64) Counter
         {
             std::atomic<i32> pending{0};
             std::atomic<u32> generation{1};
-            platform::SpinLock lock;
-            bool done = true;
-            u32 waitingHead = 0;
+            std::atomic<u64> waiting{Pack(1, kClosed)};
             alignas(16) u8 closure[detail::kClosureSize];
         };
 
-        // Lock-free stack of indices; the upper 32 bits of the head are a tag against ABA.
-        class IndexStack
+        // Free indices move between threads in chains of kChain, one tagged CAS per chain.
+        class IndexPool
         {
         public:
-            void Init(std::atomic<u32>* next, u32 count)
+            static constexpr u32 kChain = 64;
+
+            void Init(std::atomic<u32>* next, std::atomic<u32>* chainNext, u32 count)
             {
                 next_ = next;
+                chainNext_ = chainNext;
+                count_ = count;
+                fresh_.store(1, std::memory_order_relaxed);
                 head_.store(0, std::memory_order_relaxed);
-                for (u32 i = count; i-- > 1;)
-                    Push(i);
             }
 
-            void Push(u32 index)
+            void PushChain(u32 first)
             {
                 u64 old = head_.load(std::memory_order_relaxed);
                 u64 desired;
                 do
                 {
-                    next_[index].store(u32(old), std::memory_order_relaxed);
-                    desired = (((old >> 32) + 1) << 32) | index;
+                    chainNext_[first].store(u32(old), std::memory_order_relaxed);
+                    desired = (((old >> 32) + 1) << 32) | first;
                 } while (!head_.compare_exchange_weak(old, desired, std::memory_order_release, std::memory_order_relaxed));
             }
 
-            u32 Pop()
+            // Fills out with up to kChain indices, returns how many.
+            u32 PopChain(u32* out)
             {
                 u64 old = head_.load(std::memory_order_acquire);
                 for (;;)
                 {
-                    u32 index = u32(old);
-                    if (!index)
-                        return 0;
-                    u32 next = next_[index].load(std::memory_order_relaxed);
-                    u64 desired = (((old >> 32) + 1) << 32) | next;
+                    u32 first = u32(old);
+                    if (!first)
+                        break;
+                    u32 nextChain = chainNext_[first].load(std::memory_order_relaxed);
+                    u64 desired = (((old >> 32) + 1) << 32) | nextChain;
                     if (head_.compare_exchange_weak(old, desired, std::memory_order_acquire, std::memory_order_acquire))
-                        return index;
+                    {
+                        u32 n = 0;
+                        for (u32 i = first; i && n < kChain; i = next_[i].load(std::memory_order_relaxed))
+                            out[n++] = i;
+                        return n;
+                    }
                 }
+                u32 start = fresh_.fetch_add(kChain, std::memory_order_relaxed);
+                if (start >= count_)
+                    return 0;
+                u32 n = Min(kChain, count_ - start);
+                for (u32 i = 0; i < n; i++)
+                    out[i] = start + i;
+                return n;
+            }
+
+            void LinkAndPush(const u32* items, u32 n)
+            {
+                for (u32 i = 0; i + 1 < n; i++)
+                    next_[items[i]].store(items[i + 1], std::memory_order_relaxed);
+                next_[items[n - 1]].store(0, std::memory_order_relaxed);
+                PushChain(items[0]);
             }
 
         private:
             std::atomic<u64> head_{0};
+            std::atomic<u32> fresh_{1};
             std::atomic<u32>* next_ = nullptr;
+            std::atomic<u32>* chainNext_ = nullptr;
+            u32 count_ = 0;
         };
 
         // Chase-Lev work stealing deque: the owner pushes and pops at the bottom, thieves steal at the top.
@@ -134,45 +163,104 @@ namespace helix::jobs
             }
         };
 
-        // Per-thread cache in front of a shared index stack, refilled and drained in batches.
+        // Bounded MPMC queue (sequence number per cell): the inbox of one worker.
+        struct alignas(64) Inbox
+        {
+            static constexpr u32 kCapacity = 1024;
+            struct Cell
+            {
+                std::atomic<u32> sequence;
+                u32 job;
+            };
+
+            Cell cells[kCapacity];
+            alignas(64) std::atomic<u32> enqueuePos{0};
+            alignas(64) std::atomic<u32> dequeuePos{0};
+
+            Inbox()
+            {
+                for (u32 i = 0; i < kCapacity; i++)
+                    cells[i].sequence.store(i, std::memory_order_relaxed);
+            }
+
+            bool Push(u32 job)
+            {
+                u32 pos = enqueuePos.load(std::memory_order_relaxed);
+                for (;;)
+                {
+                    Cell& c = cells[pos & (kCapacity - 1)];
+                    i32 dif = i32(c.sequence.load(std::memory_order_acquire) - pos);
+                    if (dif == 0)
+                    {
+                        if (enqueuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_seq_cst, std::memory_order_relaxed))
+                        {
+                            c.job = job;
+                            c.sequence.store(pos + 1, std::memory_order_release);
+                            return true;
+                        }
+                    }
+                    else if (dif < 0)
+                        return false;
+                    else
+                        pos = enqueuePos.load(std::memory_order_relaxed);
+                }
+            }
+
+            u32 Pop()
+            {
+                u32 pos = dequeuePos.load(std::memory_order_relaxed);
+                for (;;)
+                {
+                    Cell& c = cells[pos & (kCapacity - 1)];
+                    i32 dif = i32(c.sequence.load(std::memory_order_acquire) - (pos + 1));
+                    if (dif == 0)
+                    {
+                        if (dequeuePos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+                        {
+                            u32 job = c.job;
+                            c.sequence.store(pos + kCapacity, std::memory_order_release);
+                            return job;
+                        }
+                    }
+                    else if (dif < 0)
+                        return 0;
+                    else
+                        pos = dequeuePos.load(std::memory_order_relaxed);
+                }
+            }
+        };
+
         struct IndexCache
         {
-            static constexpr u32 kCapacity = 256;
-            static constexpr u32 kBatch = 64;
+            static constexpr u32 kCapacity = 4 * IndexPool::kChain;
             u32 items[kCapacity];
             u32 count = 0;
 
-            u32 Pop(IndexStack& shared)
+            u32 Pop(IndexPool& pool)
             {
                 if (!count)
-                {
-                    for (u32 i = 0; i < kBatch; i++)
-                    {
-                        u32 v = shared.Pop();
-                        if (!v)
-                            break;
-                        items[count++] = v;
-                    }
-                    if (!count)
-                        return 0;
-                }
-                return items[--count];
+                    count = pool.PopChain(items);
+                return count ? items[--count] : 0;
             }
 
-            void Push(IndexStack& shared, u32 index)
+            void Push(IndexPool& pool, u32 index)
             {
                 if (count == kCapacity)
                 {
-                    for (u32 i = 0; i < kBatch; i++)
-                        shared.Push(items[--count]);
+                    count -= IndexPool::kChain;
+                    pool.LinkAndPush(items + count, IndexPool::kChain);
                 }
                 items[count++] = index;
             }
 
-            void Flush(IndexStack& shared)
+            void Flush(IndexPool& pool)
             {
                 while (count)
-                    shared.Push(items[--count]);
+                {
+                    u32 n = Min(count, IndexPool::kChain);
+                    count -= n;
+                    pool.LinkAndPush(items + count, n);
+                }
             }
         };
 
@@ -180,11 +268,14 @@ namespace helix::jobs
         {
             Job jobs[kMaxJobs];
             std::atomic<u32> jobNext[kMaxJobs];
+            std::atomic<u32> jobChainNext[kMaxJobs];
             Counter counters[kMaxCounters];
             std::atomic<u32> counterNext[kMaxCounters];
-            IndexStack freeJobs;
-            IndexStack freeCounters;
+            std::atomic<u32> counterChainNext[kMaxCounters];
+            IndexPool freeJobs;
+            IndexPool freeCounters;
             Deque deques[kMaxThreads];
+            Inbox inboxes[kMaxThreads];
             platform::Thread threads[kMaxThreads];
             u32 workerCount = 0;
             std::atomic<bool> running{false};
@@ -230,11 +321,22 @@ namespace helix::jobs
             return job;
         }
 
+        thread_local u32 nextInbox = 0;
+
+        // Jobs scheduled from worker jobs stay local; jobs from the main or foreign threads are dealt out to worker inboxes.
         void Push(u32 job)
         {
-            if (threadIndex < 0 || !sys->deques[threadIndex].Push(job))
+            bool pushed = false, fenced = false;
+            if (threadIndex > 0)
+                pushed = sys->deques[threadIndex].Push(job);
+            else if (sys->workerCount > 0)
+                pushed = fenced = sys->inboxes[1 + (nextInbox++ % sys->workerCount)].Push(job);
+            if (!pushed && threadIndex >= 0)
+                pushed = sys->deques[threadIndex].Push(job);
+            if (!pushed)
                 PushGlobal(job);
-            std::atomic_thread_fence(std::memory_order_seq_cst);
+            if (!fenced)
+                std::atomic_thread_fence(std::memory_order_seq_cst);
             if (sys->sleeping.load(std::memory_order_relaxed) > sys->wakesInFlight.load(std::memory_order_relaxed))
             {
                 sys->wakesInFlight.fetch_add(1, std::memory_order_relaxed);
@@ -242,19 +344,36 @@ namespace helix::jobs
             }
         }
 
+        thread_local u32 stealSeed = 0x9e3779b9u;
+
         u32 FindWork()
         {
             u32 self = threadIndex >= 0 ? u32(threadIndex) : 0;
             if (threadIndex >= 0)
+            {
                 if (u32 job = sys->deques[self].Pop())
                     return job;
+                if (u32 job = sys->inboxes[self].Pop())
+                    return job;
+            }
             u32 threads = sys->workerCount + 1;
-            for (u32 k = 1; k < threads; k++)
-                if (u32 job = sys->deques[(self + k) % threads].Steal())
-                    return job;
-            if (threadIndex < 0)
-                if (u32 job = sys->deques[0].Steal())
-                    return job;
+            if (threads > 1)
+            {
+                stealSeed ^= stealSeed << 13;
+                stealSeed ^= stealSeed >> 17;
+                stealSeed ^= stealSeed << 5;
+                u32 start = stealSeed % threads;
+                for (u32 k = 0; k < threads; k++)
+                {
+                    u32 victim = (start + k) % threads;
+                    if (threadIndex >= 0 && victim == self)
+                        continue;
+                    if (u32 job = sys->inboxes[victim].Pop())
+                        return job;
+                    if (u32 job = sys->deques[victim].Steal())
+                        return job;
+                }
+            }
             return PopGlobal();
         }
 
@@ -287,11 +406,8 @@ namespace helix::jobs
                     platform::YieldThread();
             }
             Counter& k = sys->counters[c];
-            k.lock.Lock();
-            k.done = false;
-            k.waitingHead = 0;
             k.pending.store(pending, std::memory_order_relaxed);
-            k.lock.Unlock();
+            k.waiting.store(Pack(k.generation.load(std::memory_order_relaxed), 0), std::memory_order_release);
             return c;
         }
 
@@ -315,13 +431,10 @@ namespace helix::jobs
             Counter& k = sys->counters[counter];
             if (k.pending.fetch_sub(1, std::memory_order_acq_rel) != 1)
                 return;
-            k.lock.Lock();
-            k.done = true;
-            u32 waiting = k.waitingHead;
-            k.waitingHead = 0;
-            u32 g = k.generation.load(std::memory_order_relaxed) + 1;
-            k.generation.store(g ? g : 1, std::memory_order_release);
-            k.lock.Unlock();
+            u32 generation = k.generation.load(std::memory_order_relaxed);
+            u32 waiting = u32(k.waiting.exchange(Pack(generation, kClosed), std::memory_order_acq_rel));
+            u32 nextGeneration = generation + 1;
+            k.generation.store(nextGeneration ? nextGeneration : 1, std::memory_order_release);
             FreeCounter(counter);
             while (waiting)
             {
@@ -349,15 +462,15 @@ namespace helix::jobs
             if (!dependency.IsValid())
                 return false;
             Counter& k = sys->counters[dependency.index];
-            k.lock.Lock();
-            bool queued = k.generation.load(std::memory_order_relaxed) == dependency.generation && !k.done;
-            if (queued)
+            u64 head = k.waiting.load(std::memory_order_acquire);
+            for (;;)
             {
-                sys->jobs[job].nextWaiting = k.waitingHead;
-                k.waitingHead = job;
+                if (u32(head >> 32) != dependency.generation || u32(head) == kClosed)
+                    return false;
+                sys->jobs[job].nextWaiting = u32(head);
+                if (k.waiting.compare_exchange_weak(head, Pack(dependency.generation, job), std::memory_order_acq_rel, std::memory_order_acquire))
+                    return true;
             }
-            k.lock.Unlock();
-            return queued;
         }
 
         JobHandle HandleOf(u32 counter) { return {counter, sys->counters[counter].generation.load(std::memory_order_acquire)}; }
@@ -434,8 +547,8 @@ namespace helix::jobs
         if (sys)
             return true;
         sys = New<System>(HeapAllocator());
-        sys->freeJobs.Init(sys->jobNext, kMaxJobs);
-        sys->freeCounters.Init(sys->counterNext, kMaxCounters);
+        sys->freeJobs.Init(sys->jobNext, sys->jobChainNext, kMaxJobs);
+        sys->freeCounters.Init(sys->counterNext, sys->counterChainNext, kMaxCounters);
         u32 workers = desc.workerCount >= 0 ? u32(desc.workerCount) : (platform::LogicalCoreCount() > 1 ? platform::LogicalCoreCount() - 1 : 0);
         if (!platform::ThreadsSupported())
             workers = 0;
